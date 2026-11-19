@@ -1,0 +1,32 @@
+# --- Segreti (MAI committare) ---
+.env
+.env.*
+*.env
+
+# --- Ambiente virtuale e cache Python ---
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Cache dati locale (rigenerabile) ---
+models_data/
+
+# --- Artefatti di esecuzione ---
+tts_output.mp3
+*.log
+
+# I *.bak restano tracciati nel commit iniziale pre-refactor:
+# sono la rete di sicurezza storica, vengono rimossi in F1.
+
+# --- Ambiente ---
+.venv/
+venv/
+
+# --- Media generati ---
+*.mp4
+*.wav
+*.mp3
+*.glb
+
+# esempio di configurazione: deve restare versionato
+!.env.example

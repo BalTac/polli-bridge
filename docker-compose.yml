@@ -1,0 +1,11 @@
+services:
+  polli-bridge:
+    build: .
+    image: polli-bridge:2.0.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8083:8083"
+    env_file:
+      - .env
+    environment:
+      SERVER_HOST: 0.0.0.0
