@@ -103,12 +103,19 @@ class SmokeTests(unittest.TestCase):
 
 
 class LocalAuthTests(unittest.TestCase):
+    """Il token locale condiviso vale nella modalita' "server" (chiave sul server)."""
+
     def setUp(self):
         self.assertTrue(hasattr(server, "LOCAL_API_TOKEN"))
         self._saved = server.LOCAL_API_TOKEN
+        self._saved_mode = server.AUTH_MODE
+        # AUTH_MODE viene deciso all'import: senza .env la CI parte in "open",
+        # quindi qui la forziamo per testare il token locale.
+        server.AUTH_MODE = "server"
 
     def tearDown(self):
         server.LOCAL_API_TOKEN = self._saved
+        server.AUTH_MODE = self._saved_mode
 
     def test_auth_off_by_default(self):
         # path inesistente: 404 (non 401) significa che il middleware non blocca.
@@ -139,6 +146,9 @@ class LocalAuthTests(unittest.TestCase):
 
 class AuthModeTests(unittest.TestCase):
     """La modalita' la decide la configurazione: server key, open su loopback, o BYOP."""
+
+    def test_mode_is_one_of_the_three(self):
+        self.assertIn(server.AUTH_MODE, ("server", "open", "byop"))
 
     def setUp(self):
         self._saved_mode = server.AUTH_MODE
