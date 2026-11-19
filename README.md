@@ -7,6 +7,10 @@ Text, images, image edits, speech, transcription, video, 3D and embeddings — e
 speaks the OpenAI API works by changing a single `base_url`. Self-hosted, one secret key, no
 database, no account system.
 
+
+![Swagger UI, all endpoints](docs/screenshot.png)
+
+
 ```python
 from openai import OpenAI
 
