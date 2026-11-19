@@ -3,6 +3,7 @@
 
 import base64
 import logging
+from contextvars import ContextVar
 from urllib.parse import quote
 import aiohttp
 import json
@@ -19,6 +20,10 @@ import re
 from config import CURRENT_TIER_CONFIG, USAGE_TIER, TTS_CHUNK_MAX_CHARS
 
 logger = logging.getLogger(__name__)
+
+# Chiave portata dal singolo chiamante (BYOP). ContextVar: ogni richiesta ha il
+# suo contesto, quindi la chiave di uno non finisce nelle chiamate di un altro.
+REQUEST_TOKEN: ContextVar[Optional[str]] = ContextVar("pollinations_request_token", default=None)
 
 # Limite per OpenAI Audio API (24MB per sicurezza)
 MAX_AUDIO_SIZE_MB = 24
@@ -62,6 +67,10 @@ class PollinationsClient:
         self.api_base_url = self.text_api_url
         logger.debug(f"PollinationsClient initialized with image_api={image_api_url}, text_api={text_api_url}, token={'Yes' if api_token else 'No'}")
     
+    def _effective_token(self) -> Optional[str]:
+        """Chiave verso upstream: quella del chiamante se c'e', altrimenti quella del server."""
+        return REQUEST_TOKEN.get() or self.api_token
+
     async def _make_request(self, method, url, params=None, headers=None, json_data=None, stream=False, timeout=None):
         """
         Make a HTTP request with appropriate error handling.
@@ -81,12 +90,13 @@ class PollinationsClient:
             headers = {}
         
         # Add API token to headers if available (Bearer authentication)
-        if self.api_token:
-            headers['Authorization'] = f'Bearer {self.api_token}'
+        token = self._effective_token()
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
 
         # Add API key as query parameter if available (fallback auth method)
-        if self.api_token:
-            params['key'] = self.api_token
+        if token:
+            params['key'] = token
         
         # Use custom timeout if provided, otherwise use instance timeout
         request_timeout = timeout if timeout is not None else self.timeout
@@ -172,8 +182,9 @@ class PollinationsClient:
         for field, (filename, content, content_type) in (files or {}).items():
             form.add_field(field, content, filename=filename, content_type=content_type)
         headers = {}
-        if self.api_token:
-            headers['Authorization'] = f'Bearer {self.api_token}'
+        token = self._effective_token()
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
         timeout_config = aiohttp.ClientTimeout(total=self.timeout)
         try:
             async with aiohttp.ClientSession(timeout=timeout_config) as session:

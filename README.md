@@ -92,15 +92,52 @@ Interactive docs: `/docs` (Swagger UI), `/redoc` (ReDoc), `/swagger` (alias of `
 
 ## Security
 
+Two modes, decided by one thing: **whether the server holds a key**.
+
+| `POLLINATIONS_API_TOKEN` | Bind | Mode |
+|---|---|---|
+| set | loopback | **server key** — the gateway pays with your key |
+| set | non-loopback | **server key + `LOCAL_API_TOKEN`** — required, the process refuses to start without it |
+| empty | loopback | **open** — you can try it immediately; anonymous requests go out, a caller key is used when present |
+| empty | non-loopback | **BYOP** — every caller must send its own key, missing key → `401` |
+
 - Binds to **127.0.0.1** by default.
-- If you bind to anything else, **`LOCAL_API_TOKEN` is required** — the process refuses to start
-  without it. Set it and send `X-API-Key: <token>` or `Authorization: Bearer <token>`.
+- With a server key on a non-loopback bind, **`LOCAL_API_TOKEN` is required** — the process refuses
+  to start without it. Set it and send `X-API-Key: <token>` or `Authorization: Bearer <token>`.
   `/health` and the docs stay open.
 - The upstream key lives only in `.env` (0600) or the container environment. It is never logged
   and never echoed in responses.
 - Prompts are **not** written to logs (only upstream status codes and byte counts).
 - No telemetry, no database, no state on disk except `.env` and the model catalog cache in
   `models_data/` (24h TTL, safe to delete).
+
+## Serving it publicly (bring your own key)
+
+Leave `POLLINATIONS_API_TOKEN` empty, bind to a public interface, and the same binary becomes a
+**BYOP gateway**: your balance is never touched, because there is no server key to spend. Every
+request must carry the caller's own key:
+
+```bash
+curl http://your-host:8083/v1/chat/completions \
+  -H "Authorization: Bearer sk_the_callers_own_key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "openai", "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+No key → `401` with an explicit message. `/health` reports `"auth": "byop"`.
+
+What to put in front of it if strangers will use it:
+
+- a per-IP rate limit (`limit_req` in nginx, or Caddy `rate_limit`) — the VPS, not your balance,
+  is the thing that can be hammered;
+- request and response size caps (videos are megabytes);
+- TLS (Caddy gets a certificate in two lines);
+- logs without headers: keys must never reach a log file.
+
+If you want the traffic attributed to a Pollinations **App Key** (developer earnings and referrals),
+users have to obtain their key through your app, i.e. the `<polli-connect>` flow in
+[`BRING_YOUR_OWN_POLLEN.md`](https://github.com/pollinations/pollinations/blob/main/BRING_YOUR_OWN_POLLEN.md).
+A key copied by hand from the dashboard works, but it is not attributed to anyone.
 
 ## Costs
 
@@ -122,7 +159,7 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-21 tests, standard library only, **no network**: the ASGI app is called in-process and the
+29 tests, standard library only, **no network**: the ASGI app is called in-process and the
 upstream client is mocked. That is deliberate — a test suite that spends your balance is a test
 suite nobody runs.
 

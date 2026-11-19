@@ -20,7 +20,7 @@ import uvicorn
 import config
 
 # Import the API client
-from client import PollinationsClient
+from client import PollinationsClient, REQUEST_TOKEN
 from openai_compat import create_router
 from media import create_media_router
 
@@ -74,24 +74,32 @@ logger.info("PollinationsClient initialized.")
 # --- Lifespan Event Handler ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — la validazione della configurazione sta FUORI dal try: se il
+    # setup non e' sicuro il processo deve morire, non proseguire con un log.
+    if AUTH_MODE == "server":
+        if LOCAL_API_TOKEN:
+            logger.info("Auth mode: server key + LOCAL_API_TOKEN (private instance).")
+        elif not _LOOPBACK:
+            raise RuntimeError(
+                "POLLINATIONS_API_TOKEN is set but LOCAL_API_TOKEN is not, and the server "
+                f"is bound to {config.SERVER_HOST}: refusing to start. Set LOCAL_API_TOKEN "
+                "(recommended), bind to 127.0.0.1, or remove POLLINATIONS_API_TOKEN to run "
+                "as a BYOP gateway.")
+        else:
+            logger.info("Auth mode: server key, loopback bind only (safe).")
+    elif AUTH_MODE == "byop":
+        logger.info("Auth mode: BYOP — every caller must send its own key "
+                    "(Authorization: Bearer sk_...); no key -> 401. No server key is used.")
+    else:
+        logger.info("Auth mode: open on loopback — anonymous requests allowed, "
+                    "a caller key is used when present.")
+
     try:
         # ffmpeg: basta guardare il PATH, senza lanciare un processo per scoprirlo
         if shutil.which("ffmpeg"):
             logger.info("ffmpeg disponibile - compressione e divisione audio attiva")
         else:
             logger.warning("ffmpeg non trovato - compressione e divisione audio non disponibili")
-
-        loopback = config.SERVER_HOST in ("127.0.0.1", "localhost", "::1")
-        if LOCAL_API_TOKEN:
-            logger.info("Local auth enabled (LOCAL_API_TOKEN is set).")
-        elif not loopback:
-            raise RuntimeError(
-                "LOCAL_API_TOKEN is not set but the server is bound to "
-                f"{config.SERVER_HOST}: refusing to start. Set LOCAL_API_TOKEN "
-                "(recommended) or bind to 127.0.0.1.")
-        else:
-            logger.info("Local auth disabled, loopback bind only (safe).")
 
         # Load models asynchronously in the background
         image_models_list, text_models_list, voices_list = await load_or_fetch_models(
@@ -110,8 +118,18 @@ async def lifespan(app: FastAPI):
 # --- Initialize FastAPI App ---
 app = FastAPI(
     title="Pollinations API Server",
-    description="Local server for Pollinations AI API interactions",
+    description=(
+        "OpenAI-compatible gateway in front of Pollinations: text, images, image edits, "
+        "speech, transcription, video, 3D and embeddings behind one base_url. "
+        "Self-hosted, one API key, no database."
+    ),
     version="2.0.0",
+    openapi_tags=[
+        {"name": "openai-compat", "description": "The /v1 surface: drop-in for the OpenAI SDK."},
+        {"name": "media", "description": "Native Pollinations extras: video, 3D, embeddings, jobs."},
+        {"name": "meta", "description": "Health and service information."},
+        {"name": "default", "description": "Legacy endpoints, kept for existing clients."},
+    ],
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -138,20 +156,57 @@ MAX_STT_UPLOAD_BYTES = 200 * 1024 * 1024
 LOCAL_API_TOKEN = config.LOCAL_API_TOKEN
 _PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/swagger", "/openapi.json"}
 
+# --- Modalita' di autenticazione: la decide la configurazione, non un flag ---
+#   "server"  chiave sul server (istanza privata, eventualmente con LOCAL_API_TOKEN)
+#   "open"    loopback senza chiave: si prova subito, la chiave del client e' opzionale
+#   "byop"    esposta senza chiave: ogni chiamante porta la sua, senza -> 401
+_LOOPBACK = config.SERVER_HOST in ("127.0.0.1", "localhost", "::1")
+if config.POLLINATIONS_API_TOKEN:
+    AUTH_MODE = "server"
+elif _LOOPBACK:
+    AUTH_MODE = "open"
+else:
+    AUTH_MODE = "byop"
+
 START_TIME = time.time()
+
+
+def _supplied_token(request: Request) -> str:
+    """Chiave presentata dal chiamante: X-API-Key oppure Authorization: Bearer."""
+    supplied = (request.headers.get("x-api-key") or "").strip()
+    header = request.headers.get("authorization", "")
+    if header[:7].lower() == "bearer ":
+        supplied = header[7:].strip()
+    return supplied
 
 
 @app.middleware("http")
 async def local_auth(request: Request, call_next):
-    """Auth locale: attiva solo se LOCAL_API_TOKEN e' impostata."""
-    if LOCAL_API_TOKEN and request.url.path not in _PUBLIC_PATHS:
-        supplied = request.headers.get("x-api-key") or ""
-        header = request.headers.get("authorization", "")
-        if header[:7].lower() == "bearer ":
-            supplied = header[7:].strip()
-        if supplied != LOCAL_API_TOKEN:
+    """Autenticazione secondo AUTH_MODE: chiave del server, del chiamante, o nessuna."""
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    supplied = _supplied_token(request)
+
+    if AUTH_MODE == "server":
+        if LOCAL_API_TOKEN and supplied != LOCAL_API_TOKEN:
             return JSONResponse({"detail": "Missing or invalid local API token"}, status_code=401)
-    return await call_next(request)
+        return await call_next(request)
+
+    if AUTH_MODE == "byop" and not supplied:
+        return JSONResponse(
+            {"detail": "This gateway is bring-your-own-key: send your own Pollinations key as "
+                       "Authorization: Bearer sk_yourkey (or X-API-Key). No server key is used."},
+            status_code=401)
+
+    if not supplied:
+        return await call_next(request)
+
+    ctx = REQUEST_TOKEN.set(supplied)
+    try:
+        return await call_next(request)
+    finally:
+        REQUEST_TOKEN.reset(ctx)
 
 
 @app.get('/health', tags=['meta'])
@@ -163,7 +218,7 @@ async def health_check():
         "version": app.version,
         "pid": os.getpid(),
         "bind": config.SERVER_HOST,
-        "auth": "enabled" if LOCAL_API_TOKEN else "disabled",
+        "auth": AUTH_MODE if AUTH_MODE != "server" else ("enabled" if LOCAL_API_TOKEN else "disabled"),
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "upstream": {
             "image": config.IMAGE_API_BASE_URL,

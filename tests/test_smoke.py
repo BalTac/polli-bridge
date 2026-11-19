@@ -137,6 +137,90 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class AuthModeTests(unittest.TestCase):
+    """La modalita' la decide la configurazione: server key, open su loopback, o BYOP."""
+
+    def setUp(self):
+        self._saved_mode = server.AUTH_MODE
+        self._saved_token = server.LOCAL_API_TOKEN
+
+    def tearDown(self):
+        server.AUTH_MODE = self._saved_mode
+        server.LOCAL_API_TOKEN = self._saved_token
+        server.REQUEST_TOKEN.set(None)
+
+    def test_byop_rejects_missing_key(self):
+        server.AUTH_MODE = "byop"
+        server.LOCAL_API_TOKEN = None
+        status, body, _ = call("GET", "/v1/models")
+        self.assertEqual(status, 401)
+        self.assertIn("bring-your-own-key", json.loads(body)["detail"])
+
+    def test_byop_accepts_client_key(self):
+        server.AUTH_MODE = "byop"
+        server.LOCAL_API_TOKEN = None
+        status, _, _ = call("GET", "/percorso-inesistente", "",
+                            [(b"authorization", b"Bearer sk_utente")])
+        self.assertEqual(status, 404)  # passa l'auth, poi 404 di routing
+
+    def test_byop_accepts_x_api_key_too(self):
+        server.AUTH_MODE = "byop"
+        server.LOCAL_API_TOKEN = None
+        status, _, _ = call("GET", "/percorso-inesistente", "", [(b"x-api-key", b"sk_utente")])
+        self.assertEqual(status, 404)
+
+    def test_open_mode_on_loopback_allows_anonymous(self):
+        server.AUTH_MODE = "open"
+        server.LOCAL_API_TOKEN = None
+        status, _, _ = call("GET", "/percorso-inesistente")
+        self.assertEqual(status, 404)
+
+    def test_server_mode_still_requires_the_local_token(self):
+        server.AUTH_MODE = "server"
+        server.LOCAL_API_TOKEN = "segreto"
+        status, _, _ = call("GET", "/percorso-inesistente")
+        self.assertEqual(status, 401)
+
+    def test_health_reports_the_mode(self):
+        for mode in ("byop", "open"):
+            server.AUTH_MODE = mode
+            status, body, _ = call("GET", "/health")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["auth"], mode)
+
+    def test_effective_token_prefers_the_caller(self):
+        client_obj = PollinationsClient(image_api_url="http://stub",
+                                        text_api_url="http://stub",
+                                        api_token="sk_server")
+        server.REQUEST_TOKEN.set("sk_utente")
+        self.assertEqual(client_obj._effective_token(), "sk_utente")
+        server.REQUEST_TOKEN.set(None)
+        self.assertEqual(client_obj._effective_token(), "sk_server")
+
+    def test_caller_key_reaches_the_upstream_call(self):
+        server.AUTH_MODE = "byop"
+        server.LOCAL_API_TOKEN = None
+        captured = {}
+
+        async def fake_proxy(method, path, payload=None, stream=False):
+            captured['token'] = server.client._effective_token()
+            return 200, {"id": "chatcmpl-1", "choices": []}, "application/json", None
+
+        original = server.client.proxy_json
+        server.client.proxy_json = fake_proxy
+        try:
+            status, _, _ = call("POST", "/v1/chat/completions", "",
+                                [(b"content-type", b"application/json"),
+                                 (b"authorization", b"Bearer sk_utente")],
+                                b'{"model":"m","messages":[]}')
+        finally:
+            server.client.proxy_json = original
+
+        self.assertEqual(status, 200)
+        self.assertEqual(captured.get('token'), "sk_utente",
+                         "la chiave del chiamante non e' arrivata al punto di chiamata upstream")
+
+
 class OpenAITests(unittest.TestCase):
     def test_models_list_is_openai_shaped(self):
         status, body, _ = call("GET", "/v1/models")
