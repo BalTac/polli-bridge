@@ -1,0 +1,42 @@
+# aibridge.bot.nu — stack di produzione
+#
+# polli-bridge non pubblica porte sull'host: vive solo nella rete interna e
+# Caddy gli parla per nome servizio. L'unica superficie esposta e' 80/443.
+services:
+  polli-bridge:
+    build: ./app
+    image: polli-bridge:2.0.0
+    restart: unless-stopped
+    env_file:
+      - ./app/.env
+    environment:
+      SERVER_HOST: 0.0.0.0
+    expose:
+      - "8083"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    build: ./caddy
+    image: aibridge-caddy:local
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./site:/srv/site:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+      - ./data/logs:/var/log/caddy
+    depends_on:
+      - polli-bridge
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

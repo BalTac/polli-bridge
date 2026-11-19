@@ -1,0 +1,8 @@
+# aibridge.bot.nu — robots.txt
+# Crawling is allowed: this is a public API demo.
+# LLM agents: read /llms.txt before anything else.
+
+User-agent: *
+Allow: /
+
+# No sitemap: the site is a single page plus /docs and /stats.

@@ -1,0 +1,65 @@
+{
+	admin off
+	email admin@bot.nu
+	storage file_system /data
+	log {
+		level INFO
+	}
+}
+
+aibridge.bot.nu {
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+		# Privacy: il path va nei log, la query string no. Senza questo filtro un
+		# GET /generate?prompt=... scriverebbe il prompt su disco.
+		format filter {
+			wrap json
+			request>uri regexp "^([^?]+)\?.*$" "${1}"
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
+	# API: tutto quello che non e' un file statico.
+	# Rate limit: 60 richieste/minuto sostenute + 20 di burst = 80 eventi in
+	# una finestra scorrevole di 60 s, per IP mascherato lato collector.
+	# Il plugin risponde 429 con Retry-After quando la finestra e' piena.
+	@api path /v1/* /generate /models/* /account/* /text/* /audio/* /video/* /3d/* /docs* /redoc* /openapi.json /health /swagger
+	handle @api {
+		rate_limit {
+			zone api_per_ip {
+				key {remote_host}
+				events 80
+				window 1m
+			}
+		}
+		request_body {
+			max_size 25MB
+		}
+		reverse_proxy polli-bridge:8083 {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 300s
+			}
+		}
+	}
+
+	# Tutto il resto: landing, llms.txt, /.well-known/, statistiche.
+	handle {
+		root * /srv/site
+		try_files {path} {path}.html {path}/ /index.html
+		file_server
+	}
+}

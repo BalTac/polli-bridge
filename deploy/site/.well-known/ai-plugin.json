@@ -1,0 +1,19 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "aibridge",
+  "name_for_model": "aibridge",
+  "description_for_human": "An OpenAI-compatible gateway to Pollinations. Bring your own Pollinations API key.",
+  "description_for_model": "Gateway that proxies OpenAI-compatible requests to Pollinations. BYOP: every request must include the caller's own Pollinations key as 'Authorization: Bearer sk_...'. Without a key the API returns 401. Base URL for OpenAI-style paths is https://aibridge.bot.nu/v1. Full schema at https://aibridge.bot.nu/openapi.json, plain-text contract at https://aibridge.bot.nu/llms.txt.",
+  "auth": {
+    "type": "user_http",
+    "authorization_type": "bearer"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://aibridge.bot.nu/openapi.json",
+    "is_user_authenticated": true
+  },
+  "logo_url": "https://raw.githubusercontent.com/pollinations/pollinations/main/packages/ui/src/brand/badge-made-with.svg",
+  "contact_email": "admin@bot.nu",
+  "legal_info_url": "https://aibridge.bot.nu/"
+}

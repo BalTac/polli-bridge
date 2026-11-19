@@ -1,0 +1,8 @@
+Contact: mailto:admin@bot.nu
+Expires: 2027-11-19T00:00:00.000Z
+Preferred-Languages: en, it
+Canonical: https://aibridge.bot.nu/.well-known/security.txt
+Policy: https://aibridge.bot.nu/
+# This gateway stores no user data. Reports about abuse of the endpoint
+# (scraping, flooding, illegal content) are welcome: they reach the operator
+# directly. No bounty program, but a thank-you note is guaranteed.

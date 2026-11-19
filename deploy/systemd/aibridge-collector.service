@@ -1,0 +1,10 @@
+[Unit]
+Description=aibridge traffic collector (masked IPs, aggregates only)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /srv/aibridge/collector/collector.py --with-geo
+Nice=10
+IOSchedulingClass=idle

@@ -7,6 +7,11 @@ Text, images, image edits, speech, transcription, video, 3D and embeddings — e
 speaks the OpenAI API works by changing a single `base_url`. Self-hosted, one secret key, no
 database, no account system.
 
+**Live demo — bring your own key: <https://aibridge.bot.nu>**
+That deployment holds no key of its own: it forwards your key, bills your balance, and
+returns 401 without one. How it is built (TLS, rate limit, privacy-preserving stats):
+[DEPLOY.md](DEPLOY.md).
+
 
 ![Swagger UI, all endpoints](docs/screenshot.png)
 

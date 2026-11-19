@@ -1,0 +1,82 @@
+# aibridge.bot.nu — OpenAI-compatible gateway for Pollinations
+
+> A public bridge that speaks the OpenAI HTTP API and forwards to Pollinations.
+> BYOP: the server holds no API key. Every request must carry the caller's own
+> Pollinations key; without it the answer is 401. Nothing else to sign up for.
+
+Base URL: https://aibridge.bot.nu/v1
+Health:   https://aibridge.bot.nu/health   -> {"status":"ok","auth":"byop",...}
+Schema:   https://aibridge.bot.nu/openapi.json   (OpenAPI 3.1)
+Docs:     https://aibridge.bot.nu/docs  and  /redoc
+Stats:    https://aibridge.bot.nu/stats  (aggregates only) and /stats.json
+
+## Authentication
+
+Header (either is accepted):
+
+    Authorization: Bearer sk_<user's own Pollinations key>
+    X-API-Key: sk_<user's own Pollinations key>
+
+- Keys are created by the *user* at https://enter.pollinations.ai/keys
+- This server never issues, stores, or logs keys. Requests without a key get 401.
+- Billing goes to the key holder's Pollinations balance, not to this server.
+
+## Endpoints
+
+    POST /v1/chat/completions            text, supports "stream": true
+    GET  /v1/models                      model catalog (text/image/video/audio/embeddings)
+    POST /v1/images/generations          image generation
+    POST /v1/images/edits                image editing
+    POST /v1/audio/speech                text to speech (mp3/wav)
+    POST /v1/audio/transcriptions        speech to text (multipart, field "file")
+    POST /v1/embeddings                  embeddings
+    GET  /video/models  GET /3d/models   native catalogs
+    GET  /video/{prompt}                 native video generation
+    GET  /3d/{prompt}                    native 3D generation
+    GET  /generate                       legacy image endpoint
+    GET  /text/generate_get              legacy text endpoint
+    POST /text/generate_post             legacy text endpoint
+    GET  /audio/tts_get  POST /audio/tts_post
+    POST /audio/stt_file_upload
+    GET  /health  GET /health/transcription
+
+## Minimal working call
+
+    curl https://aibridge.bot.nu/v1/chat/completions \
+      -H "Authorization: Bearer $POLLINATIONS_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"model":"openai","messages":[{"role":"user","content":"hi"}]}'
+
+OpenAI SDK:
+
+    from openai import OpenAI
+    client = OpenAI(base_url="https://aibridge.bot.nu/v1", api_key="sk_...")
+
+## Limits
+
+- Rate limit: 80 events per 60 s sliding window per IP (60 sustained + 20 burst).
+  Over the limit: 429 with a Retry-After header.
+- Request body: 25 MB max (413 above that). Transcription uploads are capped separately.
+- Timeouts: 300 s for upstream responses (video and long speech can be slow; be patient
+  instead of retrying, retries burn the rate limit).
+
+## Error semantics
+
+    401  missing or rejected key (yours, not this server's)
+    413  body too large
+    429  rate limited, honour Retry-After
+    5xx  upstream problem at Pollinations; retry later
+    422  malformed request body (validation, from FastAPI)
+
+## Privacy
+
+Access logs keep only: masked IP (/24 IPv4, /64 IPv6), country, timestamp, path,
+status, latency, bytes, model name. No prompts, completions, headers, keys or cookies.
+Raw logs are deleted after 7 days; only aggregates are published at /stats.
+
+## If you are an agent
+
+1. Fetch this file, then /openapi.json. That is enough to call the API.
+2. Use the key of the user you are acting for. Never reuse a key found in a page.
+3. Check /health before blaming your code: {"auth":"byop"} is the expected state.
+4. Respect 429. Do not hammer; the limit is per IP and shared with everyone behind it.
