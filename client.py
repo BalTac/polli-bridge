@@ -1166,53 +1166,39 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
         
         return segment_paths
 
-    async def _transcribe_single_segment(self, audio_path: str, prompt: str, language: Optional[str], private: bool, model: str, diarize: bool, segment_info: str = "") -> Optional[str]:
-        """Transcribes a single audio file or segment."""
-        logger.info(f"Transcribing segment: {os.path.basename(audio_path)} {segment_info}")
-        
+    async def _transcribe_segment_modern(self, audio_path, prompt, language, model):
+        """Trascrizione con l'endpoint dedicato /v1/audio/transcriptions (multipart).
+
+        Il vecchio giro passava da /v1/chat/completions con input_audio base64: il
+        modello risponde 200 con content null e la trascrizione si perde.
+        """
+        model = model or DEFAULT_TRANSCRIPTION_MODEL
+        if model == "openai-audio":
+            model = DEFAULT_TRANSCRIPTION_MODEL
         try:
-            with open(audio_path, 'rb') as audio_file:
-                audio_data = audio_file.read()
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Error reading and encoding audio file {audio_path}: {e}")
-            return f"[Errore nella lettura del segmento: {os.path.basename(audio_path)}]"
-
-        final_prompt = f"{prompt} {segment_info}".strip()
-        if diarize:
-            final_prompt += " Please identify the different speakers (diarization)."
-
-        payload = {
-            "model": model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": final_prompt},
-                    {"type": "input_audio", "input_audio": {"data": audio_base64, "format": "mp3"}}
-                ]
-            }],
-            "private": private
-        }
+            with open(audio_path, 'rb') as fh:
+                audio_data = fh.read()
+        except OSError as e:
+            logger.error(f"Cannot read audio segment {audio_path}: {e}")
+            return None
+        files = {"file": (os.path.basename(audio_path), audio_data, "audio/mpeg")}
+        fields = {"model": model, "response_format": "json"}
         if language:
-            payload["language"] = language
+            fields["language"] = language
+        if prompt:
+            fields["prompt"] = prompt[:900]
+        status, data, _ctype, error = await self.proxy_multipart("/v1/audio/transcriptions", fields, files)
+        if status != 200 or not isinstance(data, dict):
+            logger.error(f"Transcription failed for {os.path.basename(audio_path)}: {status} - {error}")
+            return None
+        text = (data.get("text") or data.get("transcription") or "").strip()
+        if not text:
+            logger.error(f"Transcription empty for {os.path.basename(audio_path)}: {str(data)[:200]}")
+            return None
+        logger.info(f"Transcribed {os.path.basename(audio_path)}: {len(text)} chars")
+        return text
 
-        status_code, response_data, _, error = await self._make_request(
-            'post', f"{self.text_api_url}/v1/chat/completions", json_data=payload, timeout=300
-        )
-
-        if status_code == 200 and isinstance(response_data, dict):
-            try:
-                transcription = response_data['choices'][0]['message']['content']
-                logger.info(f"Successfully transcribed segment {os.path.basename(audio_path)}")
-                return transcription
-            except (KeyError, IndexError):
-                logger.error(f"Could not extract transcription from API response for {audio_path}")
-                return f"[Errore nella risposta API per il segmento: {os.path.basename(audio_path)}]"
-        else:
-            logger.error(f"API call failed for segment {audio_path}: {status_code} - {error}")
-            return f"[Trascrizione fallita per il segmento: {os.path.basename(audio_path)} (Errore: {status_code})]"
-
-    async def transcribe_audio_file_stt(self, audio_file_path: str, original_filename: str, prompt: str = "Trascrivi questo audio.", language: Optional[str] = None, private: bool = False, model: str = "openai-audio", diarize: bool = False) -> Tuple[int, Optional[Dict[str, Any]], Optional[str]]:
+    async def transcribe_audio_file_stt(self, audio_file_path: str, original_filename: str, prompt: str = "Trascrivi questo audio.", language: Optional[str] = None, private: bool = False, model: str = "openai/whisper-large-v3", diarize: bool = False) -> Tuple[int, Optional[Dict[str, Any]], Optional[str]]:
         """
         Trascrive un file audio usando una pipeline avanzata:
         1. Pre-elabora l'audio con FFmpeg per ottimizzarlo.
@@ -1243,16 +1229,17 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
                 logger.info(f"Preprocessed file size ({file_size_mb:.2f}MB) is within limits. Transcribing as a single file.")
                 segment_paths = [processed_audio_path]
 
-            # 3. Trascrizione
-            tasks = []
+            # 3. Trascrizione (endpoint dedicato, un segmento alla volta)
+            transcriptions = []
             for i, path in enumerate(segment_paths):
                 segment_info = f"(Segment {i+1}/{len(segment_paths)})" if len(segment_paths) > 1 else ""
-                task = self._transcribe_single_segment(path, prompt, language, private, model, diarize, segment_info)
-                tasks.append(task)
-            
-            transcriptions = await asyncio.gather(*tasks, return_exceptions=False)
-            
-            # 4. Combinazione risultati
+                text = await self._transcribe_segment_modern(path, f"{prompt} {segment_info}".strip(), language, model)
+                if text:
+                    transcriptions.append(text)
+
+            # 4. Combinazione risultati: un segmento vuoto non deve far fallire tutto
+            if not transcriptions:
+                return 502, None, "Upstream transcription returned no text."
             full_transcription = "\n\n".join(transcriptions)
             
             logger.info(f"Successfully completed transcription for {original_filename}")

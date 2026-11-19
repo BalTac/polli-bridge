@@ -590,7 +590,7 @@ async def handle_audio_stt_file_upload(
     prompt: str = Form("Trascrivi questo audio."),
     language: Optional[str] = Form(None),
     private: bool = Form(False),
-    model: str = Form("openai-audio"),
+    model: str = Form("openai/whisper-large-v3"),
     diarize: bool = Form(False)
 ):
     """Handles audio file upload for Speech-to-Text transcription."""

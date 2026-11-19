@@ -7,6 +7,8 @@ Esecuzione:  venv/bin/python -m unittest discover -s tests -v
 """
 import asyncio
 import json
+import os
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -236,6 +238,54 @@ class TimestampTests(unittest.TestCase):
             server.client.proxy_json = original
         self.assertEqual(status, 200)
         self.assertIn("timestamps", json.loads(body))
+
+
+class TranscriptionTests(unittest.TestCase):
+    """La trascrizione deve passare dall'endpoint dedicato, non da chat+input_audio."""
+
+    def _run(self, upstream_payload, monkeypatch_path=None):
+        client_obj = server.client
+        calls = {}
+
+        async def fake_preprocess(path):
+            return path
+
+        async def fake_multipart(path, fields, files):
+            calls['path'] = path
+            calls['fields'] = dict(fields)
+            calls['files'] = list((files or {}).keys())
+            return 200, upstream_payload, "application/json", None
+
+        original_mp = client_obj.proxy_multipart
+        original_pp = client_obj._preprocess_audio
+        client_obj.proxy_multipart = fake_multipart
+        client_obj._preprocess_audio = fake_preprocess
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.write(b"ID3fake-frame")
+        tmp.close()
+        try:
+            status, payload, error = asyncio.run(client_obj.transcribe_audio_file_stt(
+                audio_file_path=tmp.name, original_filename="prova.mp3", language="it"))
+        finally:
+            client_obj.proxy_multipart = original_mp
+            client_obj._preprocess_audio = original_pp
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+        return status, payload, error, calls
+
+    def test_uses_dedicated_transcription_endpoint(self):
+        status, payload, error, calls = self._run({"text": "ciao mondo"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["transcription"], "ciao mondo")
+        self.assertEqual(calls["path"], "/v1/audio/transcriptions")
+        self.assertEqual(calls["files"], ["file"])
+        self.assertEqual(calls["fields"]["language"], "it")
+
+    def test_empty_transcription_is_an_upstream_error_not_a_crash(self):
+        status, payload, error, _ = self._run({"text": ""})
+        self.assertEqual(status, 502)
+        self.assertIsNone(payload)
+        self.assertIn("no text", error)
 
 
 if __name__ == "__main__":
