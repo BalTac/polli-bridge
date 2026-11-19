@@ -26,6 +26,10 @@ MAX_AUDIO_SIZE_MB = 24
 # Durata segmenti per STT in secondi (10 minuti)
 STT_SEGMENT_DURATION_SECONDS = 600
 
+# Modelli di default per gli endpoint dedicati (sovrascrivibili per chiamata)
+DEFAULT_TRANSCRIPTION_MODEL = "openai/whisper-large-v3"
+DEFAULT_TTS_MODEL = "openai/tts-1"
+
 # Limite approssimativo per il payload (in bytes) - circa 4MB per essere sicuri
 MAX_PAYLOAD_SIZE = 4 * 1024 * 1024  
 
@@ -549,19 +553,14 @@ CRITICAL: Your response must be {target_char_limit} characters or less. Return O
         return await self._make_request('post', url, headers=headers, json_data=payload, stream=stream)
 
     def _prepare_tts_prompt(self, text: str, language: Optional[str] = None) -> str:
+        """Restituisce il testo da leggere, e nient'altro.
+
+        Prima qui si costruiva un paragrafo di istruzioni con il testo fra virgolette:
+        il modello leggeva ad alta voce anche le istruzioni. Verificato con whisper:
+        la trascrizione dell'audio cominciava con "Certo, ora ripetero' il testo...".
+        Il TTS deve ricevere solo il testo; il tono lo decide la voce, non un prompt.
         """
-        Prepara un prompt avanzato per il Text-to-Speech, ispirato da text_to_speech_sample.py.
-        """
-        language_instruction = f"Read this text in {language} language applying gramatic rules and pronunciation" if language else "Detect the language of the text and read it in the same language, applying gramatic rules and pronunciation"
-        
-        instructions = (
-            "REPEAT this text naturally and expressively, analyzing the content to determine the appropriate tone and style. "
-            "IMPORTANT REQUIREMENT: If you encounter any content that might be considered harmful, offensive, or inappropriate, "
-            "automatically rephrase those parts to meet your content policies while maintaining "
-            "the viewpoint, style, and meaning. Don't refuse to continue! "
-            f"IMPORTANT: {language_instruction}: '{text}'"
-        )
-        return instructions
+        return text.strip()
 
     async def generate_audio_tts_get(self, prompt: str, voice: str = "alloy", language: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """Generate speech audio from text using GET method. Internally uses the POST audio-capable endpoint."""
@@ -915,105 +914,37 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
         return last_status_code, None, last_content_type, last_error
 
     async def _make_tts_api_call(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], chunk_num: int = 0, total_chunks: int = 1) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
-        """Make a single TTS API call without fallback logic."""
-        url = f"{self.text_api_url}/v1/chat/completions"
-        headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}        
-        
-        full_prompt = self._prepare_tts_prompt(text, language)
+        """Una chiamata TTS sull'endpoint dedicato, che ritorna i byte audio.
 
-        # Always request WAV from the API for consistency, especially for merging
+        Prima passava da /v1/chat/completions con modalities=["text","audio"]: il
+        modello leggeva anche il preambolo di istruzioni e, tolto quello, rispondeva
+        conversando invece di leggere. /v1/audio/speech legge il testo e basta.
+        """
+        url = f"{self.text_api_url}/v1/audio/speech"
+        headers = {'Content-Type': 'application/json'}
+
+        tts_model = model if model and model != 'openai-audio' else DEFAULT_TTS_MODEL
         payload = {
-            "model": model,
-            "modalities": ["text", "audio"],
-            "audio": {"voice": voice, "format": "wav"},
-            "messages": [{"role": "user", "content": full_prompt}],
-            "private": private
+            "model": tts_model,
+            "input": self._prepare_tts_prompt(text, language),
+            "voice": voice or "alloy",
+            "response_format": response_format or "mp3",
         }
-        
-        # Increased timeout for potentially slow API responses
-        status_code, response_data, content_type, error = await self._make_request('post', url, headers=headers, json_data=payload, timeout=180)
-        
-        # Log the raw response for debugging purposes
-        logger.debug(f"TTS API response for chunk {chunk_num+1}: status={status_code}, content_type={content_type}")
-        if status_code != 200:
-            logger.warning(f"Non-200 status code for chunk {chunk_num+1}: {status_code} - {error}")
-        
-        if status_code == 200:
-            # Validate that we have a dictionary response
-            if not isinstance(response_data, dict):
-                error_msg = f"API returned non-dict response for chunk {chunk_num+1}: {type(response_data)}"
-                logger.error(error_msg)
-                return 500, None, content_type, error_msg
-            
-            # Check if the response indicates success but with unexpected structure
-            if 'choices' not in response_data:
-                error_msg = f"API response missing 'choices' field for chunk {chunk_num+1}. Response keys: {list(response_data.keys())}"
-                logger.error(error_msg)
-                return 500, None, content_type, error_msg
-            
-            try:
-                # Robust validation of nested JSON structure
-                choices = response_data.get('choices')
-                if not choices or not isinstance(choices, list) or len(choices) == 0:
-                    error_msg = f"Invalid API response for chunk {chunk_num+1}: 'choices' array is empty or invalid"
-                    logger.error(error_msg)
-                    return 500, None, content_type, error_msg
-                
-                first_choice = choices[0]
-                if not first_choice or not isinstance(first_choice, dict):
-                    error_msg = f"Invalid API response for chunk {chunk_num+1}: first choice is not a valid object"
-                    logger.error(error_msg)
-                    return 500, None, content_type, error_msg
-                
-                message = first_choice.get('message')
-                if not message or not isinstance(message, dict):
-                    error_msg = f"Invalid API response for chunk {chunk_num+1}: 'message' is missing or invalid"
-                    logger.error(error_msg)
-                    return 500, None, content_type, error_msg
-                
-                audio = message.get('audio')
-                if not audio or not isinstance(audio, dict):
-                    error_msg = f"Invalid API response for chunk {chunk_num+1}: 'audio' is missing or invalid"
-                    logger.error(error_msg)
-                    return 500, None, content_type, error_msg
-                
-                audio_data_base64 = audio.get('data')
-                if not audio_data_base64 or not isinstance(audio_data_base64, str):
-                    error_msg = f"Invalid API response for chunk {chunk_num+1}: 'audio.data' is missing or not a string"
-                    logger.error(error_msg)
-                    return 500, None, content_type, error_msg
-                
-                # All validation passed, decode the audio
-                audio_binary_wav = base64.b64decode(audio_data_base64)
-                logger.debug(f"Successfully extracted audio data for chunk {chunk_num+1}: {len(audio_binary_wav)} bytes")
-                
-                # If the final desired format is MP3 and this is a single-chunk call, convert it now.
-                # If it's part of a multi-chunk process, conversion happens after merging.
-                if response_format == 'mp3' and total_chunks == 1:
-                    mp3_path = await self._convert_audio_data(audio_binary_wav, 'wav', 'mp3')
-                    if mp3_path:
-                        with open(mp3_path, 'rb') as f:
-                            final_audio = f.read()
-                        os.remove(mp3_path)
-                        return 200, final_audio, 'audio/mpeg', None
-                    else:
-                        logger.warning("MP3 conversion failed for single chunk, returning WAV.")
-                        return 200, audio_binary_wav, 'audio/wav', None
-                
-                # Return raw WAV data for multi-chunk processing or if WAV was requested
-                return 200, audio_binary_wav, 'audio/wav', None
 
-            except (KeyError, IndexError, TypeError, ValueError) as e:
-                error_msg = f"Error processing API response for chunk {chunk_num+1}: {str(e)}"
-                logger.error(f"{error_msg}")
-                return 500, None, content_type, error_msg
-            except Exception as e:
-                error_msg = f"Unexpected error processing API response for chunk {chunk_num+1}: {str(e)}"
-                logger.error(f"{error_msg}")
-                return 500, None, content_type, error_msg
-        
-        logger.error(f"API call failed for chunk {chunk_num+1}: {status_code} - {error}")
-        return status_code, None, content_type, error
+        status_code, response_data, content_type, error = await self._make_request(
+            'post', url, headers=headers, json_data=payload, timeout=180)
+
+        logger.debug(f"TTS chunk {chunk_num+1}: status={status_code}, content_type={content_type}")
+
+        if status_code != 200:
+            logger.warning(f"TTS chunk {chunk_num+1} failed: {status_code} - {error}")
+            return status_code, None, content_type, error
+
+        if isinstance(response_data, bytes) and response_data:
+            return 200, response_data, content_type, None
+
+        logger.error(f"TTS chunk {chunk_num+1}: nessun byte audio (content_type={content_type})")
+        return 502, None, content_type, "TTS upstream returned no audio"
 
     async def _convert_audio_data(self, audio_data: bytes, input_format: str, output_format: str) -> Optional[str]:
         """Converts binary audio data from one format to another using ffmpeg."""

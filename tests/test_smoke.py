@@ -288,5 +288,37 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn("no text", error)
 
 
+class TtsTests(unittest.TestCase):
+    """Il TTS deve leggere il testo e basta, sull'endpoint dedicato."""
+
+    def test_tts_uses_speech_endpoint_with_plain_text(self):
+        client_obj = server.client
+        seen = {}
+
+        async def fake_request(method, url, params=None, headers=None, json_data=None, stream=False, timeout=None):
+            seen['url'] = url
+            seen['payload'] = json_data
+            return 200, b"ID3fake-mp3", "audio/mpeg", None
+
+        original = client_obj._make_request
+        client_obj._make_request = fake_request
+        try:
+            status, data, ctype, error = asyncio.run(client_obj._make_tts_api_call(
+                "Ciao mondo", "nova", "openai-audio", "mp3", False, "it"))
+        finally:
+            client_obj._make_request = original
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, b"ID3fake-mp3")
+        self.assertTrue(seen['url'].endswith("/v1/audio/speech"), seen['url'])
+        self.assertEqual(seen['payload']['input'], "Ciao mondo")
+        self.assertEqual(seen['payload']['model'], "openai/tts-1")
+
+    def test_tts_prompt_has_no_instruction_preamble(self):
+        prompt = server.client._prepare_tts_prompt("  ciao mondo  ", "it")
+        self.assertEqual(prompt, "ciao mondo")
+        self.assertNotIn("REPEAT", prompt)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

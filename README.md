@@ -118,7 +118,7 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-19 tests, standard library only, **no network**: the ASGI app is called in-process and the
+21 tests, standard library only, **no network**: the ASGI app is called in-process and the
 upstream client is mocked. That is deliberate — a test suite that spends your balance is a test
 suite nobody runs.
 
