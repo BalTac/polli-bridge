@@ -72,12 +72,19 @@ upstream key comes from `.env`.
 |---|---|---|
 | POST | `/v1/chat/completions` | streaming supported |
 | POST | `/v1/images/generations` | |
-| POST | `/v1/images/edits` | multipart: `image` + `prompt` |
+| POST | `/v1/images/edits` | multipart: `image` + `prompt` (+ optional `model`, `size`) |
 | POST | `/v1/audio/speech` | returns audio bytes |
 | POST | `/v1/audio/speech/with-timestamps` | for subtitles |
 | POST | `/v1/audio/transcriptions` | multipart: `file` (+ `language`, `prompt`) |
 | POST | `/v1/embeddings` | |
 | GET | `/v1/models` | unified catalog with `category`, `pricing`; 24h cache |
+
+**Image editing needs an image-input model.** The default for `/v1/images/edits` is
+`black-forest-labs/flux.2-klein-4b` (free tier). Free alternatives:
+`black-forest-labs/flux.1-kontext-pro`, `black-forest-labs/flux.2-flex`,
+`microsoft/mai-image-2.6`. Some editing models are paid (`paid_only: true` in the catalog,
+e.g. `prunaai/p-image-edit`, `qwen/qwen-image-2.1`, `google/gemini-3.1-flash-image`): they
+work only if your account has credits. Check `paid_only` in `/v1/models` before choosing one.
 
 **Native passthrough** (for parameters OpenAI clients cannot express)
 

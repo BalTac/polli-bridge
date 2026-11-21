@@ -78,7 +78,7 @@ def create_router(client, sse_stream):
     async def images_edits(
         image: UploadFile = File(...),
         prompt: str = Form(...),
-        model: str = Form("prunaai/p-image-edit"),
+        model: str = Form("black-forest-labs/flux.2-klein-4b"),
         size: Optional[str] = Form(None),
     ):
         content = await image.read()
