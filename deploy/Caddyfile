@@ -58,8 +58,44 @@ aibridge.bot.nu {
 
 	# Tutto il resto: landing, llms.txt, /.well-known/, statistiche.
 	handle {
-		root * /srv/site
-		try_files {path} {path}.html {path}/ /index.html
-		file_server
+		# route = ordine di esecuzione letterale. Con i direttivi sciolti Caddy mette
+		# try_files (rewrite) PRIMA di respond, e la rewrite verso /index.html fa
+		# sparire il path da cercare: la regola 404 non scatterebbe mai.
+		route {
+			root * /srv/site
+
+			# Igiene: 404 per dotfiles e file di backup, cosi' /.env e /.git/config non
+			# ricevono index.html con 200. .well-known resta servito: non matcha.
+			@hidden path_regexp hidden (?i)(^|/)\.(env|git|svn|ht|ds_store)|\.bak(-|$)
+			respond @hidden 404
+
+			try_files {path} {path}.html {path}/ /index.html
+			file_server
+		}
 	}
+}
+
+# Webmail: esposto sulla stessa identita' TLS (aibridge.bot.nu) su porta 8443,
+# in attesa che webmail.bot.nu abbia un record DNS proprio.
+https://aibridge.bot.nu:8443 {
+	log {
+		output file /var/log/caddy/webmail.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# Il pannello admin di SnappyMail si apre su ?admin: se nessuno ha impostato
+	# una password, il primo che passa la imposta. Meglio chiuderlo.
+	@adminpanel query admin=*
+	respond @adminpanel 403
+
+	reverse_proxy snappymail:8888
 }
