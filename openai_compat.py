@@ -17,7 +17,8 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 import config
-from models import load_cached_models, save_models_to_cache
+from models import (load_cached_models, save_models_to_cache,
+                    load_cached_list, filter_models_by_category)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ def _openai_model(entry, kind):
         "category": entry.get("category") or kind,
         "aliases": entry.get("aliases") or [],
         "pricing": entry.get("pricing"),
+        # Surfaced so a client can tell free from paid before spending a call.
+        "paid_only": bool(entry.get("paid_only")),
+        "per_user_rpm": entry.get("per_user_rpm"),
     }
 
 
@@ -138,10 +142,20 @@ def create_router(client, sse_stream):
     async def list_models():
         """Catalogo unificato in formato OpenAI: cache (TTL 24h) e fetch solo se vuota."""
         collected = []
-        for kind, path in (("image", config.IMAGE_MODELS_FILE), ("text", config.TEXT_MODELS_FILE)):
-            entries = _as_list(load_cached_models(path))
+        for kind, path in (("image", config.IMAGE_MODELS_FILE),
+                           ("text", config.TEXT_MODELS_FILE),
+                           ("decision", config.DECISION_MODELS_FILE)):
+            entries = _as_list(load_cached_list(path) if kind == "decision" else load_cached_models(path))
             if not entries:
-                fetched = await (client.list_image_models() if kind == "image" else client.list_text_models())
+                if kind == "image":
+                    fetched = await client.list_image_models()
+                elif kind == "text":
+                    fetched = await client.list_text_models()
+                else:
+                    fetched = await client.list_all_models()
+                    if fetched[0] == 200 and isinstance(fetched[1], list):
+                        save_models_to_cache(config.ALL_MODELS_FILE, fetched[1])
+                        fetched = (200, filter_models_by_category(fetched[1], "decision"), None)
                 if fetched[0] == 200 and fetched[1]:
                     save_models_to_cache(path, fetched[1])
                     entries = _as_list(fetched[1])

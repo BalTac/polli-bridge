@@ -155,3 +155,33 @@ def save_models_to_cache(file_path, models_data):
     except (IOError, OSError) as e:
         logger.error(f"Error saving models to cache {file_path}: {e}")
 
+
+def load_cached_list(file_path, max_age_hours=24):
+    """
+    Load a cached JSON list (the unified catalog and its subsets).
+
+    Unlike load_cached_models this has no list/dict guessing: it always returns
+    a list, empty when the file is missing, expired or malformed.
+    """
+    if not os.path.exists(file_path):
+        logger.debug(f"Cache file does not exist: {file_path}")
+        return []
+
+    file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+    if datetime.now() - file_time > timedelta(hours=max_age_hours):
+        logger.info(f"Cache is older than {max_age_hours} hours, will refresh: {file_path}")
+        return []
+
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.error(f"Error loading cached models from {file_path}: {e}")
+        return []
+
+    return data if isinstance(data, list) else []
+
+
+def filter_models_by_category(models, category):
+    """Return only the entries of a unified catalog that belong to `category`."""
+    return [m for m in models if isinstance(m, dict) and m.get("category") == category]

@@ -528,6 +528,15 @@ CRITICAL: Your response must be {target_char_limit} characters or less. Return O
         status_code, models_data, content_type, error = await self._make_request('get', url)
         return status_code, models_data, error
 
+    async def list_all_models(self):
+        """Get the unified model catalog (every category) in one request."""
+        url = f"{self.text_api_url}/models"
+
+        logger.debug(f"Retrieving unified model catalog from: {url}")
+
+        status_code, models_data, content_type, error = await self._make_request('get', url)
+        return status_code, models_data, error
+
     async def get_account_balance(self):
         """Get current pollen balance for the configured API key."""
         url = f"{self.text_api_url}/account/balance"

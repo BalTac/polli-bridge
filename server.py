@@ -25,7 +25,8 @@ from openai_compat import create_router
 from media import create_media_router
 
 # Import model loading function
-from models import load_or_fetch_models, load_cached_models, save_models_to_cache
+from models import (load_or_fetch_models, load_cached_models, save_models_to_cache,
+                    load_cached_list, filter_models_by_category)
 
 # --- Basic Logging Setup ---
 # Configure logging based on settings in config.py
@@ -378,6 +379,84 @@ async def handle_generate_image_request(
         logger.exception(f"Exception during image generation: {e}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+# --- Typed decisions (category: decision / "system one") -----------------
+# Upstream shape: POST /alpha/decisions with {"state": ..., "questions": {...}}.
+# Each question is one of three types: choice, score, noul.
+# The upstream default model is `jev`, which is paid_only: true, so a caller
+# without credits gets an error on the default path. We default to a free one.
+DECISION_DEFAULT_MODEL = "microsoft/microsoft-decision-1.1"
+DECISION_QUESTION_TYPES = ("choice", "score", "noul")
+
+
+def _validate_decision_body(body):
+    """Return the payload to forward, or raise 400 with a readable reason."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    if body.get("state") is None:
+        raise HTTPException(status_code=400, detail="'state' is required")
+
+    questions = body.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        raise HTTPException(status_code=400, detail="'questions' must be a non-empty object")
+
+    for name, question in questions.items():
+        if not isinstance(question, dict):
+            raise HTTPException(status_code=400,
+                                detail=f"questions.{name} must be an object")
+        qtype = question.get("type")
+        if qtype not in DECISION_QUESTION_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"questions.{name}.type must be one of {', '.join(DECISION_QUESTION_TYPES)}")
+
+        # Upstream rejects a question without instructions with a generic
+        # "JSON body validation failed": say it here, where it is actionable.
+        instructions = question.get("instructions")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise HTTPException(status_code=400,
+                                detail=f"questions.{name}.instructions is required")
+
+    payload = dict(body)
+    payload["model"] = body.get("model") or DECISION_DEFAULT_MODEL
+    return payload
+
+
+async def _forward_decision(body):
+    payload = _validate_decision_body(body)
+    logger.info(f"Forwarding decision request (model={payload['model']}, "
+                f"questions={len(payload['questions'])})")
+
+    status, data, content_type, error = await client.proxy_json(
+        "post", "/alpha/decisions", payload)
+    if status != 200 or data is None:
+        raise HTTPException(status_code=status if status >= 400 else 500,
+                            detail=(error or "upstream error")[:500])
+    return JSONResponse(content=data)
+
+
+@app.post('/alpha/decisions', tags=['decisions'])
+async def handle_decisions(request: Request):
+    """Native decisions endpoint: calibrated choice/score/noul answers."""
+    logger.info("Received POST request for /alpha/decisions")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    return await _forward_decision(body)
+
+
+@app.post('/v1/systemone', tags=['decisions'])
+async def handle_systemone(request: Request):
+    """TypeSafe-compatible alias of /alpha/decisions (same request, same answer)."""
+    logger.info("Received POST request for /v1/systemone")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    return await _forward_decision(body)
+
+
 @app.get('/models/image')
 async def handle_list_image_models():
     """Catalogo immagini: cache su file (TTL 24h), upstream solo se scaduta."""
@@ -404,6 +483,24 @@ async def handle_list_text_models():
         return models_data
     raise HTTPException(status_code=status_code if status_code >= 400 else 500,
                         detail=f"Failed to list text models. {error}")
+
+
+@app.get('/models/decision')
+async def handle_list_decision_models():
+    """Catalogo decision (system-one): filtrato dal catalogo unificato, cache 24h."""
+    cached = load_cached_list(config.DECISION_MODELS_FILE)
+    if cached:
+        return cached
+
+    status_code, models_data, error = await client.list_all_models()
+    if status_code == 200 and isinstance(models_data, list):
+        save_models_to_cache(config.ALL_MODELS_FILE, models_data)
+        decision_models = filter_models_by_category(models_data, "decision")
+        save_models_to_cache(config.DECISION_MODELS_FILE, decision_models)
+        return decision_models
+
+    raise HTTPException(status_code=status_code if status_code >= 400 else 500,
+                        detail=f"Failed to list decision models. {error}")
 
 
 @app.get('/account/balance')

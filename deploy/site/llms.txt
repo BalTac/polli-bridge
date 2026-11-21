@@ -24,9 +24,12 @@ Header (either is accepted):
 ## Endpoints
 
     POST /v1/chat/completions            text, supports "stream": true
-    GET  /v1/models                      model catalog (text/image/video/audio/embeddings)
+    GET  /v1/models                      model catalog (text/image/video/audio/embeddings/decision), paid_only included
     POST /v1/images/generations          image generation
     POST /v1/images/edits                image editing
+    POST /alpha/decisions                typed decisions (choice/score/noul)
+    POST /v1/systemone                   alias of /alpha/decisions (TypeSafe)
+    GET  /models/decision                decision model catalog
     POST /v1/audio/speech                text to speech (mp3/wav)
     POST /v1/audio/transcriptions        speech to text (multipart, field "file")
     POST /v1/embeddings                  embeddings

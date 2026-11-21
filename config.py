@@ -38,6 +38,9 @@ SERVER_PORT: int = int(os.getenv("SERVER_PORT", 8083))
 MODELS_DATA_DIR: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_data")
 IMAGE_MODELS_FILE: str = os.path.join(MODELS_DATA_DIR, "image_models.json")
 TEXT_MODELS_FILE: str = os.path.join(MODELS_DATA_DIR, "text_models.json")
+# Unified catalog (one call, every category) and the derived decision subset
+ALL_MODELS_FILE: str = os.path.join(MODELS_DATA_DIR, "all_models.json")
+DECISION_MODELS_FILE: str = os.path.join(MODELS_DATA_DIR, "decision_models.json")
 
 # --- Logging Configuration ---
 # (We will add more specific logging config later when implementing the logging module)

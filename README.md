@@ -77,7 +77,7 @@ upstream key comes from `.env`.
 | POST | `/v1/audio/speech/with-timestamps` | for subtitles |
 | POST | `/v1/audio/transcriptions` | multipart: `file` (+ `language`, `prompt`) |
 | POST | `/v1/embeddings` | |
-| GET | `/v1/models` | unified catalog with `category`, `pricing`; 24h cache |
+| GET | `/v1/models` | unified catalog with `category`, `pricing`, `paid_only`; 24h cache |
 
 **Image editing needs an image-input model.** The default for `/v1/images/edits` is
 `black-forest-labs/flux.2-klein-4b` (free tier). Free alternatives:
@@ -85,6 +85,51 @@ upstream key comes from `.env`.
 `microsoft/mai-image-2.6`. Some editing models are paid (`paid_only: true` in the catalog,
 e.g. `prunaai/p-image-edit`, `qwen/qwen-image-2.1`, `google/gemini-3.1-flash-image`): they
 work only if your account has credits. Check `paid_only` in `/v1/models` before choosing one.
+
+## Decisions (system one)
+
+Pollinations exposes a `decision` model category: instead of free text, you get calibrated
+answers — a pick from a list, a score, or the probability of "yes". Useful for routing,
+moderation triage and cheap classification that should not spend a text model.
+
+```bash
+curl -s http://127.0.0.1:8083/alpha/decisions\
+  -H "Authorization: Bearer $POLLINATIONS_API_KEY"\
+  -H "Content-Type: application/json"\
+  -d '{
+    "state": "My payouts have been failing for 3 days.",
+    "questions": {
+      "department": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "criteria": { "billing": "Payment issues", "technical": "Product failures" }
+      },
+      "is_urgent": { "type": "noul", "instructions": "Does this convey urgency?" }
+    }
+  }'
+```
+
+```json
+{"id": "dec-…", "model": "microsoft/microsoft-decision-1.1", "provider": "Microsoft",
+ "answers": {"department": {"type": "choice", "choice": "billing", "confidence": 0.60,
+                            "probabilities": {"billing": 0.80, "technical": 0.20}},
+             "is_urgent": {"type": "noul", "noul": 0.99}},
+ "usage": {"input_tokens": 66, "output_tokens": 2}}
+```
+
+Each question needs `type` (`choice`, `score` or `noul`) and `instructions`; `state`,
+`instructions` and `criteria` values accept a string or arbitrary JSON. The request is
+validated locally, so a malformed question fails with a 400 that names the field instead of
+a generic upstream error. There is no streaming.
+
+**The default is `microsoft/microsoft-decision-1.1` because it is free** (`paid_only: false`).
+Upstream defaults to `jev`, which is paid — a caller without credits would fail on the
+default path. Other free decision models: `microsoft/microsoft-decision-1`,
+`respan/span-01-lite` (yes/no behaviour checks) and `vllm-sr/d3`
+(**logs inputs and may use them for training**: fine for a lab, think twice in production).
+Paid ones (`typesafe/jev-1.14`, `liquid/d1`, `liquid/d1.2`, `jaredpalmer/kev-4b`,
+`perplexity/pplx-decider-v1.2`, `openai/gpt-6-luna-decisions`, `google/gemini-decision-1`)
+work only with credits. `GET /models/decision` lists them with `paid_only`.
 
 **Native passthrough** (for parameters OpenAI clients cannot express)
 
@@ -94,6 +139,9 @@ work only if your account has credits. Check `paid_only` in `/v1/models` before 
 | GET | `/3d/{prompt}` | GLB; `/3d/models` |
 | GET | `/v1/jobs/{id}` · `/v1/jobs/{id}/result` | for upstream-queued work |
 | GET | `/video/models` · `/3d/models` · `/embeddings/models` | catalogs |
+| POST | `/alpha/decisions` | typed decisions: `choice`, `score`, `noul` |
+| POST | `/v1/systemone` | alias of `/alpha/decisions` (TypeSafe-compatible) |
+| GET | `/models/decision` | decision models (11 today, 4 free) |
 
 **Legacy routes** kept for compatibility: `/generate`, `/text/generate_get`,
 `/text/generate_post`, `/audio/tts_get`, `/audio/tts_post`, `/audio/stt_file_upload`,
