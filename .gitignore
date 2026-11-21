@@ -30,3 +30,6 @@ venv/
 
 # esempio di configurazione: deve restare versionato
 !.env.example
+
+# venv usato per i test locali
+.venv-test/

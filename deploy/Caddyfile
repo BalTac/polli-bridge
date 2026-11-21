@@ -36,7 +36,7 @@ aibridge.bot.nu {
 	# Rate limit: 60 richieste/minuto sostenute + 20 di burst = 80 eventi in
 	# una finestra scorrevole di 60 s, per IP mascherato lato collector.
 	# Il plugin risponde 429 con Retry-After quando la finestra e' piena.
-	@api path /v1/* /generate /models/* /account/* /text/* /audio/* /video/* /3d/* /docs* /redoc* /openapi.json /health /swagger
+	@api path /v1/* /alpha/* /generate /models/* /account/* /text/* /audio/* /video/* /3d/* /docs* /redoc* /openapi.json /health /swagger
 	handle @api {
 		rate_limit {
 			zone api_per_ip {
