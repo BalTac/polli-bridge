@@ -181,31 +181,47 @@ def _supplied_token(request: Request) -> str:
     return supplied
 
 
+# Header con cui marchiamo ogni risposta: come ha chiamato il client. Serve alle
+# statistiche per distinguere traffico con chiave da quello anonimo. Valori:
+#   key     -> il chiamante ha presentato una chiave (BYOP/open)
+#   server  -> usa la chiave del server (istanza con POLLINATIONS_API_TOKEN)
+#   none    -> nessuna chiave, richiesta servita comunque (solo AUTH_MODE=open)
+#   denied  -> rifiutata dal gateway (nessuna chiave o token locale sbagliato)
+#   public  -> endpoint pubblico (/health, /docs, ...)
+# Mai il valore della chiave, solo la categoria.
+AUTH_HEADER = "X-Polli-Auth"
+
+
+def _mark(response, kind: str):
+    response.headers[AUTH_HEADER] = kind
+    return response
+
+
 @app.middleware("http")
 async def local_auth(request: Request, call_next):
     """Autenticazione secondo AUTH_MODE: chiave del server, del chiamante, o nessuna."""
     if request.url.path in _PUBLIC_PATHS:
-        return await call_next(request)
+        return _mark(await call_next(request), "public")
 
     supplied = _supplied_token(request)
 
     if AUTH_MODE == "server":
         if LOCAL_API_TOKEN and supplied != LOCAL_API_TOKEN:
-            return JSONResponse({"detail": "Missing or invalid local API token"}, status_code=401)
-        return await call_next(request)
+            return _mark(JSONResponse({"detail": "Missing or invalid local API token"}, status_code=401), "denied")
+        return _mark(await call_next(request), "server")
 
     if AUTH_MODE == "byop" and not supplied:
-        return JSONResponse(
+        return _mark(JSONResponse(
             {"detail": "This gateway is bring-your-own-key: send your own Pollinations key as "
                        "Authorization: Bearer sk_yourkey (or X-API-Key). No server key is used."},
-            status_code=401)
+            status_code=401), "denied")
 
     if not supplied:
-        return await call_next(request)
+        return _mark(await call_next(request), "none")
 
     ctx = REQUEST_TOKEN.set(supplied)
     try:
-        return await call_next(request)
+        return _mark(await call_next(request), "key")
     finally:
         REQUEST_TOKEN.reset(ctx)
 

@@ -217,6 +217,11 @@ CREATE TABLE IF NOT EXISTS limited (
     day TEXT NOT NULL, ip_mask TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, ip_mask)
 );
+CREATE TABLE IF NOT EXISTS auth_day (
+    day TEXT NOT NULL, grp TEXT NOT NULL, auth TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, grp, auth)
+);
 """
 
 
@@ -302,6 +307,22 @@ def ingest(conn: sqlite3.Connection, geo) -> int:
                    ON CONFLICT(day, country) DO UPDATE SET count = count + 1""",
                 (day, cc),
             )
+            # Categoria di autenticazione, dall'header che mette il ponte.
+            # Caddy logga gli header di risposta ma NON la chiave: qui arriva solo
+            # "key" / "server" / "none" / "denied" / "public".
+            auth_raw = (entry.get("resp_headers") or {}).get("X-Polli-Auth")
+            if isinstance(auth_raw, list) and auth_raw:
+                auth = str(auth_raw[0]).strip().lower()[:12]
+            elif isinstance(auth_raw, str) and auth_raw:
+                auth = auth_raw.strip().lower()[:12]
+            else:
+                auth = "unknown"
+            conn.execute(
+                """INSERT INTO auth_day(day, grp, auth, count) VALUES(?,?,?,1)
+                   ON CONFLICT(day, grp, auth) DO UPDATE SET count = count + 1""",
+                (day, grp, auth),
+            )
+
             ua = ((req.get("headers") or {}).get("User-Agent") or [""])[0]
             conn.execute(
                 """INSERT INTO client_day(day, client, count) VALUES(?,?,1)
@@ -378,6 +399,16 @@ def collect(conn: sqlite3.Connection) -> dict:
     clients = q("""SELECT client, SUM(count) FROM client_day WHERE day >= ?
                    GROUP BY client ORDER BY 2 DESC LIMIT 10""",
                 ((now - timedelta(days=7)).strftime("%Y-%m-%d"),))
+    week_day = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    auth_7d = q("""SELECT auth, SUM(count) FROM auth_day WHERE day >= ?
+                   GROUP BY auth ORDER BY 2 DESC""", (week_day,))
+    auth_by_group = q("""SELECT grp, auth, SUM(count) FROM auth_day WHERE day >= ?
+                         GROUP BY grp, auth ORDER BY 3 DESC LIMIT 40""", (week_day,))
+    keyed_24h = q("""SELECT COALESCE(SUM(count),0) FROM auth_day
+                     WHERE day = ? AND auth IN ('key','server')""", (today,))[0][0]
+    anon_24h = q("""SELECT COALESCE(SUM(count),0) FROM auth_day
+                    WHERE day = ? AND auth IN ('none','denied')""", (today,))[0][0]
+
     avg_dur = q("""SELECT grp, SUM(dur_ms)/SUM(count) FROM hits WHERE minute >= ?
                    GROUP BY grp HAVING SUM(count) > 0 ORDER BY 2 DESC LIMIT 8""", (week_ago,))
 
@@ -400,7 +431,11 @@ def collect(conn: sqlite3.Connection) -> dict:
             "unique_visitors_24h": uniques_today,
             "unique_visitors_7d": uniques_7d,
             "rate_limited_24h": limited_24h,
+            "keyed_24h": keyed_24h,
+            "anonymous_24h": anon_24h,
         },
+        "auth_7d": [{"auth": a, "requests": n} for a, n in auth_7d],
+        "auth_by_group_7d": [{"path": g, "auth": a, "requests": n} for g, a, n in auth_by_group],
         "status_7d": {str(k): v for k, v in statuses.items()},
         "endpoints_7d": [{"path": g, "requests": c, "bytes": b} for g, c, b in endpoints],
         "countries_7d": [{"country": c, "requests": n} for c, n in countries],
@@ -468,6 +503,14 @@ def render_html(data: dict) -> str:
         data["clients_7d"],
         [lambda r: esc(r["client"]), lambda r: f"{r['requests']:,}"],
     )
+    auth_rows = rows(
+        [{"a": a["auth"], "n": a["requests"]} for a in data.get("auth_7d", [])],
+        [lambda r: esc(r["a"]), lambda r: f"{r['n']:,}"],
+    )
+    auth_group_rows = rows(
+        data.get("auth_by_group_7d", []),
+        [lambda r: f"<code>{esc(r['path'])}</code>", lambda r: esc(r["auth"]), lambda r: f"{r['requests']:,}"],
+    )
     latency_rows = rows(
         data["avg_ms_by_endpoint_7d"],
         [lambda r: f"<code>{esc(r['path'])}</code>", lambda r: f"{r['avg_ms']} ms"],
@@ -509,6 +552,8 @@ Generato: <strong>{esc(data['generated_at_local'])}</strong> · <a href="/stats.
   <div class="card"><div class="n">{t['unique_visitors_24h']:,}</div><div class="l">visitatori unici 24h</div></div>
   <div class="card"><div class="n">{t['unique_visitors_7d']:,}</div><div class="l">unici 7 giorni</div></div>
   <div class="card"><div class="n">{bytes_h(t['bytes_7d'])}</div><div class="l">byte serviti 7g</div></div>
+  <div class="card"><div class="n">{t.get('keyed_24h', 0):,}</div><div class="l">con chiave 24h</div></div>
+  <div class="card"><div class="n">{t.get('anonymous_24h', 0):,}</div><div class="l">senza chiave 24h</div></div>
   <div class="card"><div class="n">{t['rate_limited_24h']:,}</div><div class="l">429 oggi</div></div>
 </div>
 
@@ -517,6 +562,10 @@ Generato: <strong>{esc(data['generated_at_local'])}</strong> · <a href="/stats.
 
 <h2>Endpoint (7 giorni)</h2>
 <div class="panel"><table><tr><th>endpoint</th><th>richieste</th><th>byte</th></tr>{endpoint_rows}</table></div>
+
+<h2>Autenticazione (7 giorni)</h2>
+<div class="panel"><table><tr><th>come ha chiamato</th><th>richieste</th></tr>{auth_rows}</table></div>
+<div class="panel"><table><tr><th>endpoint</th><th>auth</th><th>richieste</th></tr>{auth_group_rows}</table></div>
 
 <h2>Stato HTTP (7 giorni)</h2>
 <div class="panel"><table><tr><th>status</th><th>richieste</th></tr>{status_rows}</table></div>
@@ -532,7 +581,7 @@ Generato: <strong>{esc(data['generated_at_local'])}</strong> · <a href="/stats.
 
 <footer>
 <p>Cosa viene registrato: IP mascherato, paese (DB-IP Lite, offline), timestamp, path ridotto a un gruppo fisso,
-status, latenza, byte, famiglia di user agent. <strong>Non</strong> vengono registrati prompt, risposte, header, chiavi, cookie.
+status, latenza, byte, famiglia di user agent, e se la chiamata aveva una chiave (categoria, <strong>mai</strong> il valore). <strong>Non</strong> vengono registrati prompt, risposte, header grezzi, chiavi, cookie.
 Nessun identificatore persistente, nessun profiling, nessuna vendita di dati.</p>
 <p><a href="https://github.com/BalTac/polli-bridge">polli-bridge</a> · <a href="https://pollinations.ai/?ref=badge">pollinations.ai</a></p>
 </footer>
