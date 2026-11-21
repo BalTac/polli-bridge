@@ -73,7 +73,7 @@ upstream key comes from `.env`.
 | POST | `/v1/chat/completions` | streaming supported |
 | POST | `/v1/images/generations` | |
 | POST | `/v1/images/edits` | multipart: `image` + `prompt` (+ optional `model`, `size`) |
-| POST | `/v1/audio/speech` | returns audio bytes |
+| POST | `/v1/audio/speech` | returns audio bytes; optional `model` and `instructions` (style) |
 | POST | `/v1/audio/speech/with-timestamps` | for subtitles |
 | POST | `/v1/audio/transcriptions` | multipart: `file` (+ `language`, `prompt`) |
 | POST | `/v1/embeddings` | |
@@ -199,6 +199,30 @@ users have to obtain their key through your app, i.e. the `<polli-connect>` flow
 [`BRING_YOUR_OWN_POLLEN.md`](https://github.com/pollinations/pollinations/blob/main/BRING_YOUR_OWN_POLLEN.md).
 A key copied by hand from the dashboard works, but it is not attributed to anyone.
 
+## Speech: choosing a voice model and styling it
+
+`/v1/audio/speech` (and the legacy `/audio/tts_get`) take an optional `model`, so you are not
+stuck with the default voice engine. Models that accept a style hint also take `instructions`:
+
+```bash
+curl -s -X POST http://127.0.0.1:8083/v1/audio/speech   -H "Authorization: Bearer $POLLINATIONS_API_KEY"   -H "Content-Type: application/json"   -d '{"model": "google/gemini-3.8-flash-tts", "voice": "alloy",
+       "input": "Domani passo a prendere i documenti.",
+       "instructions": "tono pacato, leggermente ironico"}'   --output voce.mp3
+```
+
+`instructions` is forwarded to upstream as-is: models that support it (Gemini TTS, Qwen
+instruct speech) use it, the others ignore it. It is **not** sent when empty, because some
+upstream models reject an explicit null.
+
+Two practical details that are not obvious from the API:
+
+- **Some TTS models can only produce wav/pcm.** When upstream refuses `mp3` with a
+  `response_format` error, the bridge retries in wav and converts back to mp3 with ffmpeg, so
+  callers always receive mp3. If the conversion fails you get the original wav with
+  `content-type: audio/wav` instead of an error — a playable file beats a correct status code.
+- **Long text is chunked** and each chunk is a separate upstream request, so the price is the
+  sum of the chunks (`TTS_CHUNK_MAX_CHARS`, `POLLINATIONS_TIER`).
+
 ## Costs
 
 You pay Pollinations, per request, from the key's balance. Text is fractions of a cent; images
@@ -219,7 +243,7 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-29 tests, standard library only, **no network**: the ASGI app is called in-process and the
+50 tests, standard library only, **no network**: the ASGI app is called in-process and the
 upstream client is mocked. That is deliberate — a test suite that spends your balance is a test
 suite nobody runs.
 

@@ -582,7 +582,7 @@ CRITICAL: Your response must be {target_char_limit} characters or less. Return O
         """
         return text.strip()
 
-    async def generate_audio_tts_get(self, prompt: str, voice: str = "alloy", language: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
+    async def generate_audio_tts_get(self, prompt: str, voice: str = "alloy", language: Optional[str] = None, model: str = "openai-audio", instructions: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """Generate speech audio from text using GET method. Internally uses the POST audio-capable endpoint."""
 
         # Use tier-aware character limit (optionally overridden via config)
@@ -592,10 +592,10 @@ CRITICAL: Your response must be {target_char_limit} characters or less. Return O
 
         if len(prompt) > max_chars:
             logger.info(f"Text is too long for GET method based on '{USAGE_TIER.upper()}' tier limits ({len(prompt)} > {max_chars}), switching to POST chunking.")
-            return await self.generate_audio_tts_post(prompt, voice, language=language)
+            return await self.generate_audio_tts_post(prompt, voice, model=model, language=language, instructions=instructions)
 
         # Use the same POST pipeline for short text to align with the new API
-        return await self._generate_single_chunk_audio(prompt, voice, "openai-audio", "mp3", False, language)
+        return await self._generate_single_chunk_audio(prompt, voice, model, "mp3", False, language, instructions=instructions)
 
     async def _enhance_text_for_tts(self, original_text: str, language: Optional[str]) -> str:
         """
@@ -715,7 +715,7 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
         error_lower = str(error_message).lower()
         return any(indicator in error_lower for indicator in filter_indicators)
 
-    async def generate_audio_tts_post(self, text: str, voice: str, model: str = "openai-audio", response_format: str = "mp3", private: bool = False, language: Optional[str] = None, enhance_text: bool = False) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
+    async def generate_audio_tts_post(self, text: str, voice: str, model: str = "openai-audio", response_format: str = "mp3", private: bool = False, language: Optional[str] = None, enhance_text: bool = False, instructions: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """
         Generate speech audio from text using POST method.
         Handles long text by splitting it into chunks and merging the audio.
@@ -733,11 +733,11 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
 
         if len(text) <= max_chars:
             # If the text is short, use the single chunk logic
-            return await self._generate_single_chunk_audio(text, voice, model, response_format, private, language)
+            return await self._generate_single_chunk_audio(text, voice, model, response_format, private, language, instructions=instructions)
         else:
             # If the text is long, use the new handler
             logger.info(f"Text is long ({len(text)} chars), starting chunking process based on '{USAGE_TIER.upper()}' tier limits.")
-            return await self._handle_long_text_tts(text, voice, model, response_format, private, language)
+            return await self._handle_long_text_tts(text, voice, model, response_format, private, language, instructions=instructions)
 
     def _split_text(self, text: str, max_chars: int) -> List[str]:
         """
@@ -770,7 +770,7 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
         logger.info(f"Split text into {len(chunks)} chunks.")
         return chunks
 
-    async def _handle_long_text_tts(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str]) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
+    async def _handle_long_text_tts(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], instructions: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """Orchestrates the process of handling long text for TTS, including tier-aware rate limiting."""
         
         # Use tier-aware character limit for splitting (optionally overridden via config)
@@ -795,7 +795,8 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
                 
                 # Create a task for each chunk generation, passing the calculated delay
                 task = self._generate_single_chunk_audio(
-                    chunk, voice, model, "wav", private, language, i, len(text_chunks), delay=task_delay
+                    chunk, voice, model, "wav", private, language, i, len(text_chunks),
+                    delay=task_delay, instructions=instructions
                 )
                 tasks.append(task)
             
@@ -870,7 +871,7 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
             logger.error(f"Error during audio merge: {e}")
             return None
 
-    async def _generate_single_chunk_audio(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], chunk_num: int = 0, total_chunks: int = 1, delay: float = 0.0) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
+    async def _generate_single_chunk_audio(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], chunk_num: int = 0, total_chunks: int = 1, delay: float = 0.0, instructions: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """Generate speech audio for a single chunk of text using POST method, with an initial delay and content filter fallback."""
         
         # Apply the calculated delay for rate-limiting before making the request
@@ -897,7 +898,8 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
                 logger.info(f"Content filter fallback attempt {attempt_count} for chunk {chunk_num + 1}")
 
             status_code, audio_data, content_type, error = await self._make_tts_api_call(
-                current_text, voice, model, response_format, private, language, chunk_num, total_chunks
+                current_text, voice, model, response_format, private, language, chunk_num, total_chunks,
+                instructions=instructions,
             )
             
             # Store the last results for potential error reporting
@@ -933,7 +935,7 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
         logger.error(f"All TTS attempts failed for chunk {chunk_num + 1}: {last_status_code} - {last_error}")
         return last_status_code, None, last_content_type, last_error
 
-    async def _make_tts_api_call(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], chunk_num: int = 0, total_chunks: int = 1) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
+    async def _make_tts_api_call(self, text: str, voice: str, model: str, response_format: str, private: bool, language: Optional[str], chunk_num: int = 0, total_chunks: int = 1, instructions: Optional[str] = None) -> Tuple[int, Optional[bytes], Optional[str], Optional[str]]:
         """Una chiamata TTS sull'endpoint dedicato, che ritorna i byte audio.
 
         Prima passava da /v1/chat/completions con modalities=["text","audio"]: il
@@ -950,9 +952,24 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
             "voice": voice or "alloy",
             "response_format": response_format or "mp3",
         }
+        # Istruzioni di stile: le onorano i modelli che le supportano (Gemini/Qwen TTS).
+        # Per gli altri (openai/tts-1, elevenlabs) il campo viene ignorato.
+        if instructions:
+            payload["instructions"] = instructions
 
+        wanted_format = (response_format or "mp3").lower()
+        upstream_format = wanted_format
         status_code, response_data, content_type, error = await self._make_request(
             'post', url, headers=headers, json_data=payload, timeout=180)
+
+        # Alcuni modelli (es. google/gemini-*-tts) producono solo wav/pcm: si riprova
+        # in wav e si converte in mp3 con ffmpeg, cosi' il chiamante vede sempre mp3.
+        if (status_code != 200 and upstream_format == "mp3"
+                and "response_format" in str(error or "").lower()):
+            logger.info(f"TTS chunk {chunk_num+1}: {tts_model} rifiuta mp3, riprovo in wav.")
+            payload["response_format"] = upstream_format = "wav"
+            status_code, response_data, content_type, error = await self._make_request(
+                'post', url, headers=headers, json_data=payload, timeout=180)
 
         logger.debug(f"TTS chunk {chunk_num+1}: status={status_code}, content_type={content_type}")
 
@@ -961,6 +978,16 @@ IMPORTANT: Return ONLY the rewritten text, with no explanations, comments, or ad
             return status_code, None, content_type, error
 
         if isinstance(response_data, bytes) and response_data:
+            if upstream_format != wanted_format and wanted_format == "mp3":
+                converted_path = await self._convert_audio_data(response_data, upstream_format, "mp3")
+                if converted_path:
+                    with open(converted_path, 'rb') as fh:
+                        response_data = fh.read()
+                    content_type = "audio/mpeg"
+                    logger.info(f"TTS chunk {chunk_num+1}: convertito {upstream_format} -> mp3.")
+                else:
+                    logger.warning(f"TTS chunk {chunk_num+1}: conversione in mp3 fallita, "
+                                   f"restituisco {upstream_format}.")
             return 200, response_data, content_type, None
 
         logger.error(f"TTS chunk {chunk_num+1}: nessun byte audio (content_type={content_type})")

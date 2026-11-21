@@ -282,6 +282,7 @@ class TTSRequest(BaseModel):
     response_format: str = "mp3"
     private: bool = False
     enhance_text: bool = config.TTS_ENHANCE_TEXT_DEFAULT
+    instructions: Optional[str] = None  # stile/emozione: Gemini TTS e Qwen instruct speech
 
 # --- Helper Functions ---
 def allowed_audio_file(filename):
@@ -667,7 +668,9 @@ async def handle_tts_get(
     text: str = Query(..., description="Text to synthesize"),
     voice: str = Query("alloy", description="Voice to use"),
     enhance_text: bool = Query(config.TTS_ENHANCE_TEXT_DEFAULT, description="Enhance text quality before TTS"),
-    language: Optional[str] = Query(None, description="Language of the text (e.g., 'it', 'en')")
+    language: Optional[str] = Query(None, description="Language of the text (e.g., 'it', 'en')"),
+    model: str = Query("openai-audio", description="Modello TTS (es. google/gemini-3.8-flash-tts)"),
+    instructions: Optional[str] = Query(None, description="Stile/emozione (Gemini TTS, Qwen instruct)")
 ):
     logger.info(f"Received request for /audio/tts_get: text='{text[:50]}...', enhance_text={enhance_text}")
 
@@ -688,11 +691,12 @@ async def handle_tts_get(
         status_code, audio_data, content_type, error = await client.generate_audio_tts_post(
             text=text,
             voice=voice,
-            model="openai-audio",
+            model=model,
             response_format="mp3",
             private=False,
             language=language,
-            enhance_text=enhance_text
+            enhance_text=enhance_text,
+            instructions=instructions
         )
         
         if status_code == 200 and audio_data:
@@ -720,7 +724,8 @@ async def handle_tts_post(request: TTSRequest):
             model=request.model, 
             response_format=request.response_format, 
             private=request.private,
-            enhance_text=request.enhance_text  # Pass the new parameter
+            enhance_text=request.enhance_text,  # Pass the new parameter
+            instructions=request.instructions
         )
 
         if status_code == 200 and audio_data:
