@@ -64,6 +64,10 @@ aibridge.bot.nu {
 		route {
 			root * /srv/site
 
+			# Il ponte marca le risposte API con X-Polli-Auth; il sito statico lo fa qui,
+			# cosi' il collector non deve indovinare: ogni riga di log ha la sua categoria.
+			header X-Polli-Auth static
+
 			# Igiene: 404 per dotfiles e file di backup, cosi' /.env e /.git/config non
 			# ricevono index.html con 200. .well-known resta servito: non matcha.
 			@hidden path_regexp hidden (?i)(^|/)\.(env|git|svn|ht|ds_store)|\.bak(-|$)

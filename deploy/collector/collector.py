@@ -316,7 +316,9 @@ def ingest(conn: sqlite3.Connection, geo) -> int:
             elif isinstance(auth_raw, str) and auth_raw:
                 auth = auth_raw.strip().lower()[:12]
             else:
-                auth = "unknown"
+                # nessun header = risposta non marcata (log vecchi, o errore prima
+                # del middleware): la contiamo come traffico non-API.
+                auth = "static"
             conn.execute(
                 """INSERT INTO auth_day(day, grp, auth, count) VALUES(?,?,?,1)
                    ON CONFLICT(day, grp, auth) DO UPDATE SET count = count + 1""",
@@ -408,6 +410,8 @@ def collect(conn: sqlite3.Connection) -> dict:
                      WHERE day = ? AND auth IN ('key','server')""", (today,))[0][0]
     anon_24h = q("""SELECT COALESCE(SUM(count),0) FROM auth_day
                     WHERE day = ? AND auth IN ('none','denied')""", (today,))[0][0]
+    static_24h = q("""SELECT COALESCE(SUM(count),0) FROM auth_day
+                      WHERE day = ? AND auth IN ('static','public')""", (today,))[0][0]
 
     avg_dur = q("""SELECT grp, SUM(dur_ms)/SUM(count) FROM hits WHERE minute >= ?
                    GROUP BY grp HAVING SUM(count) > 0 ORDER BY 2 DESC LIMIT 8""", (week_ago,))
@@ -433,6 +437,7 @@ def collect(conn: sqlite3.Connection) -> dict:
             "rate_limited_24h": limited_24h,
             "keyed_24h": keyed_24h,
             "anonymous_24h": anon_24h,
+            "static_24h": static_24h,
         },
         "auth_7d": [{"auth": a, "requests": n} for a, n in auth_7d],
         "auth_by_group_7d": [{"path": g, "auth": a, "requests": n} for g, a, n in auth_by_group],
@@ -503,8 +508,16 @@ def render_html(data: dict) -> str:
         data["clients_7d"],
         [lambda r: esc(r["client"]), lambda r: f"{r['requests']:,}"],
     )
+    auth_labels = {
+        "key": "con chiave",
+        "server": "chiave dell'istanza",
+        "none": "senza chiave (modalita' aperta)",
+        "denied": "rifiutata (401)",
+        "public": "endpoint pubblico",
+        "static": "statico / crawler",
+    }
     auth_rows = rows(
-        [{"a": a["auth"], "n": a["requests"]} for a in data.get("auth_7d", [])],
+        [{"a": auth_labels.get(a["auth"], a["auth"]), "n": a["requests"]} for a in data.get("auth_7d", [])],
         [lambda r: esc(r["a"]), lambda r: f"{r['n']:,}"],
     )
     auth_group_rows = rows(
@@ -554,6 +567,7 @@ Generato: <strong>{esc(data['generated_at_local'])}</strong> · <a href="/stats.
   <div class="card"><div class="n">{bytes_h(t['bytes_7d'])}</div><div class="l">byte serviti 7g</div></div>
   <div class="card"><div class="n">{t.get('keyed_24h', 0):,}</div><div class="l">con chiave 24h</div></div>
   <div class="card"><div class="n">{t.get('anonymous_24h', 0):,}</div><div class="l">senza chiave 24h</div></div>
+  <div class="card"><div class="n">{t.get('static_24h', 0):,}</div><div class="l">statico / crawler 24h</div></div>
   <div class="card"><div class="n">{t['rate_limited_24h']:,}</div><div class="l">429 oggi</div></div>
 </div>
 
