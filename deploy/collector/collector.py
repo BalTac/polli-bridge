@@ -14,13 +14,17 @@ Solo standard library.
 """
 from __future__ import annotations
 
+import base64
 import bisect
 import gzip
+import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -35,6 +39,152 @@ GEO_FILE = BASE / "collector" / "country_ranges.json"
 STATE_FILE = BASE / "collector" / "state.json"
 OUT_HTML = BASE / "site" / "stats.html"
 OUT_JSON = BASE / "site" / "stats.json"
+# Indicatori interni: NON finiscono in site/ (pubblicata), restano in data/.
+INDICATORS = BASE / "data" / "indicators.json"
+HLL_FILE = BASE / "data" / "hll.json"
+SEED_FLAG = BASE / "data" / "seed-hll.flag"   # one-shot: semina lo sketch dallo storico
+KINDS_FLAG = BASE / "data" / "backfill-kinds.flag"   # one-shot: ricostruisce kind_day dai log
+
+# HyperLogLog: 16384 registri da 6 bit -> errore standard ~0.8%.
+# Conta visitatori unici *all time* senza conservare nessun identificatore:
+# si hasha l'IP gia' mascherato con un salt privato, e nel file restano solo
+# i registri (byte), non gli hash. Senza il salt non si puo' risalire a nulla.
+HLL_P = 14
+HLL_M = 1 << HLL_P
+
+# Classificazione del client dallo user agent. L'ordine conta: gli agenti AI
+# spesso si travestono da browser, e i crawler generici contengono "bot".
+KIND_RULES = (
+    ("ai-agent", re.compile(r"(claude-user|exa\w*bot|gptbot|oai-searchbot|perplexity|ccbot|anthropic-ai|cohere-ai|youbot|bytespider|amazonbot|applebot)", re.I)),
+    ("crawler", re.compile(r"(bot\b|crawler|spider|slurp|scrap|leakix|l9scan|scan\b|httpclient|headless)", re.I)),
+    ("http-tool", re.compile(r"^(curl|wget|python-requests|python-urllib|httpx|axios|node-fetch|okhttp|java/|go-http-client)", re.I)),
+    ("browser", re.compile(r"mozilla/5\.0.*(chrome|safari|firefox|edg/|opr/)", re.I)),
+)
+
+
+def kind_of(ua: str) -> str:
+    ua = (ua or "").strip()
+    if not ua:
+        return "other"
+    for name, rx in KIND_RULES:
+        if rx.search(ua):
+            return name
+    return "other"
+
+
+def hll_add(regs: bytearray, key: bytes) -> None:
+    h = int.from_bytes(hashlib.sha1(key).digest()[:8], "big")
+    idx = h >> (64 - HLL_P)
+    rest = h & ((1 << (64 - HLL_P)) - 1)
+    rho = (64 - HLL_P) - rest.bit_length() + 1
+    if rho > regs[idx]:
+        regs[idx] = rho
+
+
+def hll_count(regs: bytearray) -> int:
+    m = HLL_M
+    alpha = 0.7213 / (1.0 + 1.079 / m)
+    s = 0.0
+    for r in regs:
+        s += 2.0 ** -r
+    e = alpha * m * m / s
+    if e <= 2.5 * m:                      # range piccolo: linear counting
+        v = regs.count(0)
+        if v:
+            return int(round(m * math.log(m / v)))
+    return int(round(e))
+
+
+def backfill_kinds(conn: sqlite3.Connection, geo) -> tuple[int, int]:
+    """Ricostruisce kind_day e gli sketch per tipo leggendo TUTTI i log disponibili.
+
+    Il collector consuma i log in avanti (state.json tiene gli offset), quindi senza
+    questo la distinzione bot/crawler/umano partirebbe da zero. Toccata solo kind_day.
+    """
+    store = load_hll()
+    regs = {name: hll_regs(store, name) for name in ("all", "ai-agent", "crawler", "http-tool", "browser", "other")}
+    counts: dict[tuple[str, str], int] = {}
+    lines = 0
+    for path in sorted(LOG_DIR.glob("access*.log")):
+        try:
+            fh = path.open("rb")
+        except OSError:
+            continue
+        with fh:
+            for raw in fh:
+                try:
+                    entry = json.loads(raw)
+                except Exception:
+                    continue
+                req = entry.get("request") or {}
+                if not req:
+                    continue
+                when = datetime.fromtimestamp(float(entry.get("ts") or 0), timezone.utc)
+                day = when.strftime("%Y-%m-%d")
+                ua = ((req.get("headers") or {}).get("User-Agent") or [""])[0]
+                kind = kind_of(ua)
+                counts[(day, kind)] = counts.get((day, kind), 0) + 1
+                masked, _v = mask_ip(req.get("remote_ip") or "")
+                if masked and masked != "invalid":
+                    hll_add(regs.setdefault(kind, bytearray(HLL_M)),
+                            (store["salt"] + "|" + kind + "|" + masked).encode())
+                lines += 1
+    conn.execute("DELETE FROM kind_day")
+    for (day, kind), n in counts.items():
+        conn.execute("INSERT INTO kind_day(day, kind, count) VALUES(?,?,?)", (day, kind, n))
+    save_hll(store, regs)
+    return lines, len(counts)
+
+
+def seed_hll_from_uniques(conn: sqlite3.Connection, store: dict) -> int:
+    """Semina lo sketch 'all' con gli IP mascherati gia' aggregati in `uniques`.
+
+    Serve una volta sola: il collector consuma i log in avanti, quindi senza questa
+    semina l'all-time partirebbe da zero ignorando i giorni già raccolti.
+    """
+    regs = hll_regs(store, "all")
+    n = 0
+    for (ip_mask,) in conn.execute("SELECT ip_mask FROM uniques"):
+        if ip_mask and ip_mask != "invalid":
+            hll_add(regs, (store["salt"] + "|" + ip_mask).encode())
+            n += 1
+    merged = {name: hll_regs(store, name) for name in store.get("sketches", {})}
+    merged["all"] = regs
+    save_hll(store, merged)
+    return n
+
+
+def load_hll() -> dict:
+    """Sketch persistenti: {"salt": hex, "sketches": {kind: base64(registers)}}."""
+    if HLL_FILE.exists():
+        try:
+            d = json.loads(HLL_FILE.read_text(encoding="utf-8"))
+            if d.get("salt") and isinstance(d.get("sketches"), dict):
+                return d
+        except Exception:
+            pass
+    return {"salt": secrets.token_hex(16), "sketches": {}}
+
+
+def hll_regs(store: dict, name: str) -> bytearray:
+    raw = store["sketches"].get(name)
+    if raw:
+        b = base64.b64decode(raw)
+        if len(b) == HLL_M:
+            return bytearray(b)
+    return bytearray(HLL_M)
+
+
+def save_hll(store: dict, regs: dict[str, bytearray]) -> None:
+    store["sketches"] = {k: base64.b64encode(bytes(v)).decode("ascii") for k, v in regs.items()}
+    store["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    tmp = HLL_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(store), encoding="utf-8")
+    tmp.replace(HLL_FILE)
+    try:
+        os.chmod(HLL_FILE, 0o644)
+    except OSError:
+        pass
 
 LOCAL_TZ = timezone(timedelta(hours=1))  # Europe/Rome (CET); solo per le etichette
 RAW_RETENTION_DAYS = 7
@@ -217,6 +367,10 @@ CREATE TABLE IF NOT EXISTS limited (
     day TEXT NOT NULL, ip_mask TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, ip_mask)
 );
+CREATE TABLE IF NOT EXISTS kind_day (
+    day TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, kind)
+);
 CREATE TABLE IF NOT EXISTS auth_day (
     day TEXT NOT NULL, grp TEXT NOT NULL, auth TEXT NOT NULL,
     count INTEGER NOT NULL DEFAULT 0,
@@ -251,6 +405,9 @@ def save_state(state: dict) -> None:
 # --------------------------------------------------------------------------- ingest
 def ingest(conn: sqlite3.Connection, geo) -> int:
     state = load_state()
+    hll_store = load_hll()
+    regs_all = hll_regs(hll_store, "all")
+    regs_by_kind: dict[str, bytearray] = {}
     files = sorted(LOG_DIR.glob("access*.log"), key=lambda p: p.name)
     total = 0
     for path in files:
@@ -326,6 +483,18 @@ def ingest(conn: sqlite3.Connection, geo) -> int:
             )
 
             ua = ((req.get("headers") or {}).get("User-Agent") or [""])[0]
+            kind = kind_of(ua)
+            conn.execute(
+                """INSERT INTO kind_day(day, kind, count) VALUES(?,?,1)
+                   ON CONFLICT(day, kind) DO UPDATE SET count = count + 1""",
+                (day, kind),
+            )
+            if masked and masked != "invalid":
+                # HLL: una sola chiave per visitatore (IP mascherato), nessun giorno,
+                # cosi' il conteggio e' all-time e non sommabile a mano.
+                hll_add(regs_all, (hll_store["salt"] + "|" + masked).encode())
+                hll_add(regs_by_kind.setdefault(kind, bytearray(HLL_M)),
+                        (hll_store["salt"] + "|" + kind + "|" + masked).encode())
             conn.execute(
                 """INSERT INTO client_day(day, client, count) VALUES(?,?,1)
                    ON CONFLICT(day, client) DO UPDATE SET count = count + 1""",
@@ -347,6 +516,20 @@ def ingest(conn: sqlite3.Connection, geo) -> int:
         state[key] = offset + len(usable)
         save_state(state)
     conn.commit()
+
+    # salva gli sketch (all + per tipo di client)
+    regs_by_kind["all"] = regs_all
+    # Si parte da TUTTI gli sketch gia' su disco: sovrascrivere il dizionario con i soli
+    # sketch toccati in questo giro cancellerebbe quelli per tipo (bug visto il 23/11).
+    merged: dict[str, bytearray] = {name: hll_regs(hll_store, name)
+                                    for name in hll_store.get("sketches", {})}
+    for name, regs in regs_by_kind.items():
+        old = merged.get(name, bytearray(HLL_M))
+        for i, r in enumerate(regs):
+            if r > old[i]:
+                old[i] = r
+        merged[name] = old
+    save_hll(hll_store, merged)
     return total
 
 
@@ -613,14 +796,53 @@ def main(argv: list[str]) -> int:
         return 0
     geo = load_geo()
     conn = db()
+    if KINDS_FLAG.exists():
+        lines, groups = backfill_kinds(conn, geo)
+        try:
+            KINDS_FLAG.unlink()
+        except OSError:
+            pass
+        print(f"[collector] kind_day ricostruita da {lines} righe di log ({groups} gruppi giorno/tipo)")
+    if SEED_FLAG.exists():
+        store = load_hll()
+        seeded = seed_hll_from_uniques(conn, store)
+        try:
+            SEED_FLAG.unlink()
+        except OSError:
+            pass
+        print(f"[collector] HLL seminato da {seeded} IP mascherati storici")
     processed = ingest(conn, geo)
     prune(conn)
     data = collect(conn)
+    # va letto PRIMA di chiudere la connessione: conn.execute su un db chiuso solleva
+    kinds_today = {k: n for k, n in conn.execute(
+        "SELECT kind, SUM(count) FROM kind_day WHERE day = ? GROUP BY kind ORDER BY 2 DESC",
+        (datetime.now(timezone.utc).strftime("%Y-%m-%d"),)).fetchall()}
     conn.close()
     OUT_JSON.write_text(json.dumps(data, indent=1, ensure_ascii=False))
     OUT_HTML.write_text(render_html(data))
+
+    # Indicatori interni: NON pubblicati (stanno in data/, Caddy serve solo site/).
+    # Visitatori unici all-time stimati con HLL, spezzati per tipo di client.
+    store = load_hll()
+    kinds = {name: hll_count(hll_regs(store, name)) for name in list(store.get("sketches", {}))}
+    indicators = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "unique_all_time_hll": kinds.get("all", 0),
+        "unique_by_kind_hll": kinds,
+        "hll": {"registers": HLL_M, "error_pct": 0.81, "salt_present": bool(store.get("salt"))},
+        "kinds_today": kinds_today,
+    }
+    INDICATORS.write_text(json.dumps(indicators, indent=1, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(INDICATORS, 0o644)
+    except OSError:
+        pass
+
     print(f"[collector] {processed} righe nuove · {data['totals']['requests_24h']} richieste/24h · "
           f"{data['totals']['unique_visitors_24h']} unici/24h -> {OUT_HTML.name}")
+    print(f"  unici all-time (HLL, non pubblicato): {indicators['unique_all_time_hll']} · "
+          f"{', '.join(f'{k} {v}' for k, v in kinds.items() if k != 'all')}")
     return 0
 
 
