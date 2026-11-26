@@ -1,6 +1,6 @@
 {
 	admin off
-	email admin@bot.nu
+	email baltac.mailserver@gmail.com
 	storage file_system /data
 	log {
 		level INFO
